@@ -8,11 +8,17 @@ const LANGUAGE_NAMES: Record<string, string> = {
   de: 'German',
 };
 
+export interface ProcessChunkResult {
+  audioMap: Map<string, Buffer>;
+  transcribedText: string;
+}
+
 export async function processChunk(
   audioBuffer: Buffer,
-  targetLangs: ('ta' | 'fr' | 'de')[]
-): Promise<Map<string, Buffer>> {
-  const result = new Map<string, Buffer>();
+  targetLangs: ('ta' | 'fr' | 'de')[],
+  contextHistory: string[] = []
+): Promise<ProcessChunkResult> {
+  const audioMap = new Map<string, Buffer>();
 
   // Step 1: Whisper STT
   console.log(`[2] Whisper STT start — chunk size: ${audioBuffer.length} bytes`);
@@ -27,7 +33,7 @@ export async function processChunk(
   console.log(`[2] Whisper result: "${text || '(empty — silent chunk, skipping)'}"`);
 
   if (!text) {
-    return result;
+    return { audioMap, transcribedText: '' };
   }
 
   // Step 2 + 3: Translate + TTS in parallel per language
@@ -36,14 +42,18 @@ export async function processChunk(
       const langName = LANGUAGE_NAMES[lang];
 
       // GPT-4o translation
+      const contextBlock = contextHistory.length > 0
+        ? `Previous context (for coherence only, do not translate):\n${contextHistory.join(' ')}\n\n`
+        : '';
+
       const translationResponse = await openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [
           {
             role: 'system',
-            content: `You are a professional interpreter. Translate the following English text to ${langName}. Output only the translation, no explanations.`,
+            content: `You are a professional interpreter. Translate the following English text to ${langName}. Output only the translation, no explanations. Use the previous context to maintain coherence across sentences.`,
           },
-          { role: 'user', content: text },
+          { role: 'user', content: `${contextBlock}Translate this: ${text}` },
         ],
         temperature: 0.2,
       });
@@ -62,7 +72,7 @@ export async function processChunk(
 
       const audioData = Buffer.from(await speechResponse.arrayBuffer());
       console.log(`[4] TTS done (${lang}): ${audioData.length} bytes MP3`);
-      result.set(lang, audioData);
+      audioMap.set(lang, audioData);
     })
   );
 
@@ -72,5 +82,5 @@ export async function processChunk(
     }
   });
 
-  return result;
+  return { audioMap, transcribedText: text };
 }

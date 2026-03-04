@@ -14,6 +14,8 @@ const MAX_LISTENERS_PER_SESSION = 10;
 
 type Lang = 'ta' | 'fr' | 'de';
 
+const CONTEXT_MAX_CHUNKS = 6; // ~30s of rolling context
+
 interface Session {
   id: string;
   broadcasterSocket: WebSocket;
@@ -23,6 +25,7 @@ interface Session {
   timeoutAt: Date;
   timeoutTimer: NodeJS.Timeout;
   warningTimer: NodeJS.Timeout;
+  transcriptionHistory: string[];
 }
 
 const sessions = new Map<string, Session>();
@@ -124,6 +127,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       timeoutAt,
       timeoutTimer,
       warningTimer,
+      transcriptionHistory: [],
     };
 
     sessions.set(sessionId, session);
@@ -142,7 +146,16 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         // Audio chunk from broadcaster
         console.log(`[1] Binary chunk received — ${data.length} bytes, listeners: ta=${session.listenerSockets.get('ta')?.size ?? 0} fr=${session.listenerSockets.get('fr')?.size ?? 0}`);
         try {
-          const audioMap = await processChunk(data, ['ta', 'fr', 'de']);
+          const { audioMap, transcribedText } = await processChunk(data, ['ta', 'fr', 'de'], session.transcriptionHistory);
+
+          // Update rolling context history
+          if (transcribedText) {
+            session.transcriptionHistory.push(transcribedText);
+            if (session.transcriptionHistory.length > CONTEXT_MAX_CHUNKS) {
+              session.transcriptionHistory.shift();
+            }
+          }
+
           console.log(`[5] processChunk returned langs: [${[...audioMap.keys()].join(', ') || 'none'}]`);
           for (const [lang, audioBuf] of audioMap) {
             const count = session.listenerSockets.get(lang as Lang)?.size ?? 0;
