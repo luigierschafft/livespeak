@@ -3,12 +3,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { use } from 'react';
 
-type Lang = 'ta' | 'fr';
+type Lang = 'ta' | 'fr' | 'de';
 type Status = 'select_lang' | 'waiting' | 'playing' | 'ended' | 'error';
 
 const LANG_LABELS: Record<Lang, string> = {
   ta: 'Tamil',
   fr: 'Français',
+  de: 'Deutsch',
 };
 
 const MAX_RECONNECT_ATTEMPTS = 3;
@@ -41,19 +42,23 @@ export default function ListenPage({ params }: { params: Promise<{ sessionId: st
     try {
       // Resume context if browser auto-suspended it (e.g. tab was backgrounded)
       if (ctx.state === 'suspended') {
+        console.log('[8] AudioContext was suspended — resuming...');
         await ctx.resume();
       }
+      console.log(`[8] decodeAudioData — buf size: ${buf.byteLength} bytes, ctx state: ${ctx.state}`);
       const decoded = await ctx.decodeAudioData(buf);
+      console.log(`[9] Decoded OK — duration: ${decoded.duration.toFixed(2)}s, playing now`);
       const source = ctx.createBufferSource();
       source.buffer = decoded;
       source.connect(ctx.destination);
       source.onended = () => {
+        console.log('[9] Chunk ended, queue remaining:', audioQueueRef.current.length);
         isPlayingRef.current = false;
         playNextChunk();
       };
       source.start();
     } catch (err) {
-      console.error('Audio decode error:', err);
+      console.error('[8] Audio decode error:', err);
       isPlayingRef.current = false;
       playNextChunk();
     }
@@ -80,6 +85,7 @@ export default function ListenPage({ params }: { params: Promise<{ sessionId: st
         if (event.data instanceof Blob) {
           // Binary audio chunk
           const buf = await event.data.arrayBuffer();
+          console.log(`[7] Binary received: ${buf.byteLength} bytes, queue length before push: ${audioQueueRef.current.length}, AudioContext state: ${audioCtxRef.current?.state}`);
           audioQueueRef.current.push(buf);
           playNextChunk();
         } else {
@@ -167,7 +173,7 @@ export default function ListenPage({ params }: { params: Promise<{ sessionId: st
           <p className="text-lg font-medium mb-4" style={{ color: '#1F3864' }}>
             Choose your language
           </p>
-          {(['ta', 'fr'] as Lang[]).map((l) => (
+          {(['ta', 'fr', 'de'] as Lang[]).map((l) => (
             <button
               key={l}
               onClick={() => handleLanguageSelect(l)}

@@ -12,7 +12,7 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const WARNING_BEFORE_END_MS = 60 * 1000;   // warn 1 min before end
 const MAX_LISTENERS_PER_SESSION = 10;
 
-type Lang = 'ta' | 'fr';
+type Lang = 'ta' | 'fr' | 'de';
 
 interface Session {
   id: string;
@@ -117,6 +117,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       listenerSockets: new Map([
         ['ta', new Set()],
         ['fr', new Set()],
+        ['de', new Set()],
       ]),
       status: 'active',
       createdAt: now,
@@ -139,9 +140,13 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
       if (isBinary) {
         // Audio chunk from broadcaster
+        console.log(`[1] Binary chunk received — ${data.length} bytes, listeners: ta=${session.listenerSockets.get('ta')?.size ?? 0} fr=${session.listenerSockets.get('fr')?.size ?? 0}`);
         try {
-          const audioMap = await processChunk(data, ['ta', 'fr']);
+          const audioMap = await processChunk(data, ['ta', 'fr', 'de']);
+          console.log(`[5] processChunk returned langs: [${[...audioMap.keys()].join(', ') || 'none'}]`);
           for (const [lang, audioBuf] of audioMap) {
+            const count = session.listenerSockets.get(lang as Lang)?.size ?? 0;
+            console.log(`[6] Sending ${audioBuf.length} bytes to ${count} listener(s) for lang=${lang}`);
             broadcastToListeners(session, lang as Lang, audioBuf);
           }
         } catch (err) {
@@ -178,7 +183,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const sessionId = (parsedUrl.query.sessionId as string) || '';
     const lang = (parsedUrl.query.lang as Lang) || '';
 
-    if (!sessionId || !['ta', 'fr'].includes(lang)) {
+    if (!sessionId || !['ta', 'fr', 'de'].includes(lang)) {
       sendJSON(ws, { type: 'error', message: 'Missing or invalid sessionId/lang' });
       ws.close();
       return;
