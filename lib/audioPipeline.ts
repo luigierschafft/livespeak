@@ -1,5 +1,4 @@
-import OpenAI from 'openai';
-import { Readable } from 'stream';
+import OpenAI, { toFile } from 'openai';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -15,7 +14,8 @@ export async function processChunk(
   const result = new Map<string, Buffer>();
 
   // Step 1: Whisper STT
-  const audioFile = new File([new Uint8Array(audioBuffer)], 'chunk.webm', { type: 'audio/webm' });
+  // toFile works across all Node.js versions (unlike global File which requires Node 20+)
+  const audioFile = await toFile(audioBuffer, 'chunk.webm', { type: 'audio/webm' });
   const transcription = await openai.audio.transcriptions.create({
     file: audioFile,
     model: 'whisper-1',

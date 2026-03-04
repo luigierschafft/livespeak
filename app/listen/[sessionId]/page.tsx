@@ -39,6 +39,10 @@ export default function ListenPage({ params }: { params: Promise<{ sessionId: st
     const buf = audioQueueRef.current.shift()!;
 
     try {
+      // Resume context if browser auto-suspended it (e.g. tab was backgrounded)
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
       const decoded = await ctx.decodeAudioData(buf);
       const source = ctx.createBufferSource();
       source.buffer = decoded;

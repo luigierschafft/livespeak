@@ -18,6 +18,7 @@ export default function BroadcastPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const timeoutAtRef = useRef<Date | null>(null);
+  const shouldRecordRef = useRef(false);
 
   const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
 
@@ -43,6 +44,7 @@ export default function BroadcastPage() {
   }, []);
 
   const stopBroadcast = useCallback(() => {
+    shouldRecordRef.current = false; // prevent restart loop
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -86,11 +88,14 @@ export default function BroadcastPage() {
           setStatus('broadcasting');
           startCountdown(new Date(msg.timeoutAt));
 
-          // Start recording
+          // Start recording — stop/restart pattern ensures each chunk is a
+          // complete standalone WebM file (Whisper requires a valid audio file,
+          // not a raw WebM cluster which is what timeslice produces after chunk 1)
           const recorder = new MediaRecorder(stream, {
             mimeType: 'audio/webm;codecs=opus',
           });
           recorderRef.current = recorder;
+          shouldRecordRef.current = true;
 
           recorder.ondataavailable = (e) => {
             if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
@@ -98,7 +103,21 @@ export default function BroadcastPage() {
             }
           };
 
-          recorder.start(3000); // 3-second chunks
+          const doRecord = () => {
+            if (!shouldRecordRef.current) return;
+            recorder.start();
+            setTimeout(() => {
+              if (recorder.state === 'recording' && shouldRecordRef.current) {
+                recorder.stop();
+              }
+            }, 3000);
+          };
+
+          recorder.onstop = () => {
+            doRecord(); // restart immediately to get next complete chunk
+          };
+
+          doRecord();
         } else if (msg.type === 'session_ended') {
           stopBroadcast();
         } else if (msg.type === 'warning') {
