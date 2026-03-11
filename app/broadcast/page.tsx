@@ -5,6 +5,27 @@ import QRCode from 'react-qr-code';
 
 type Status = 'idle' | 'connecting' | 'broadcasting' | 'ended' | 'error';
 
+type PipelineVariant =
+  | 'azure-v2v'
+  | 'azure-v2v-fast'
+  | 'azure-v2v-stream'
+  | 'azure-v2v-synthesizing'
+  | 'azure-v2v-fix2'
+  | 'whisper-azure-azure'
+  | 'whisper-gpt4mini-azure'
+  | 'whisper-gpt4o-azure';
+
+const PIPELINE_OPTIONS: { value: PipelineVariant; label: string }[] = [
+  { value: 'azure-v2v',              label: 'Azure Voice-to-Voice' },
+  { value: 'azure-v2v-fast',         label: 'Azure V2V Fast (300ms Pause)' },
+  { value: 'azure-v2v-stream',       label: 'Azure V2V Stream (max 5s Segmente)' },
+  { value: 'azure-v2v-synthesizing', label: 'Azure V2V Fix1 — Sofort-Stream (synthesizing)' },
+  { value: 'azure-v2v-fix2',         label: 'Azure V2V Fix2 — 300ms + Segment-Fix + Sofort-Stream' },
+  { value: 'whisper-azure-azure',    label: 'Rang 1 — Whisper + Azure Translator + Azure TTS  (~8s)' },
+  { value: 'whisper-gpt4mini-azure', label: 'Rang 2 — Whisper + GPT-4o-mini + Azure TTS  (~12s)' },
+  { value: 'whisper-gpt4o-azure',    label: 'Rang 3 — Whisper + GPT-4o + Azure TTS  (~12.5s)' },
+];
+
 export default function BroadcastPage() {
   const [status, setStatus] = useState<Status>('idle');
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -12,6 +33,7 @@ export default function BroadcastPage() {
   const [timeLeft, setTimeLeft] = useState<number>(600); // seconds
   const [copied, setCopied] = useState(false);
   const [warning, setWarning] = useState(false);
+  const [pipeline, setPipeline] = useState<PipelineVariant>('whisper-azure-azure');
 
   const wsRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -73,7 +95,7 @@ export default function BroadcastPage() {
     }
 
     // Connect WebSocket
-    const ws = new WebSocket(`${WS_URL}/broadcast`);
+    const ws = new WebSocket(`${WS_URL}/broadcast?pipeline=${pipeline}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -139,7 +161,7 @@ export default function BroadcastPage() {
         setStatus('ended');
       }
     };
-  }, [WS_URL, startCountdown, stopBroadcast, status]);
+  }, [WS_URL, pipeline, startCountdown, stopBroadcast, status]);
 
   const copyLink = useCallback(() => {
     if (!listenerUrl) return;
@@ -181,6 +203,31 @@ export default function BroadcastPage() {
               {errorMsg}
             </div>
           )}
+
+          {/* Pipeline selector */}
+          <div className="w-full">
+            <label
+              htmlFor="pipeline-select"
+              className="block text-sm font-medium mb-1"
+              style={{ color: '#1F3864' }}
+            >
+              Translation Pipeline
+            </label>
+            <select
+              id="pipeline-select"
+              value={pipeline}
+              onChange={(e) => setPipeline(e.target.value as PipelineVariant)}
+              className="w-full rounded-xl border-2 px-3 py-3 text-sm font-medium focus:outline-none"
+              style={{ borderColor: '#2E75B6', color: '#1F3864' }}
+            >
+              {PIPELINE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <button
             onClick={startBroadcast}
             className="w-full py-4 rounded-xl text-white font-semibold text-lg transition-opacity active:opacity-80"

@@ -21,6 +21,10 @@ Real-time lecture translation app. Speaker talks into phone → Whisper STT → 
 - Source: English (en) — fixed in MVP
 - Targets: Tamil (ta), French (fr)
 
+## Commands
+- **Test**: `pnpm vitest run`
+- **Test watch**: `pnpm vitest`
+
 ## Routes
 - `/broadcast` — Speaker view
 - `/listen/[sessionId]` — Listener view

@@ -2,7 +2,8 @@ import { config } from 'dotenv';
 config({ path: '.env.local' });
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
-import { processChunk } from './lib/audioPipeline';
+import { createPipelineHandler, PipelineVariant, PipelineHandler } from './lib/serverPipelines';
+import type { Lang } from './lib/serverPipelines';
 import * as crypto from 'crypto';
 import * as url from 'url';
 
@@ -12,9 +13,14 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const WARNING_BEFORE_END_MS = 60 * 1000;   // warn 1 min before end
 const MAX_LISTENERS_PER_SESSION = 10;
 
-type Lang = 'ta' | 'fr' | 'de';
-
-const CONTEXT_MAX_CHUNKS = 6; // ~30s of rolling context
+const VALID_PIPELINES: PipelineVariant[] = [
+  'azure-v2v',
+  'azure-v2v-fast',
+  'azure-v2v-stream',
+  'whisper-azure-azure',
+  'whisper-gpt4mini-azure',
+  'whisper-gpt4o-azure',
+];
 
 interface Session {
   id: string;
@@ -25,7 +31,8 @@ interface Session {
   timeoutAt: Date;
   timeoutTimer: NodeJS.Timeout;
   warningTimer: NodeJS.Timeout;
-  transcriptionHistory: string[];
+  pipeline: PipelineVariant;
+  pipelineHandler: PipelineHandler;
 }
 
 const sessions = new Map<string, Session>();
@@ -62,6 +69,11 @@ function endSession(session: Session, reason: string) {
   clearTimeout(session.timeoutTimer);
   clearTimeout(session.warningTimer);
 
+  // Stop pipeline
+  session.pipelineHandler.stop().catch((err) => {
+    console.error(`[session] Pipeline stop error (${session.id}):`, err);
+  });
+
   // Notify all listeners
   for (const sockets of session.listenerSockets.values()) {
     for (const ws of sockets) {
@@ -77,7 +89,7 @@ function endSession(session: Session, reason: string) {
   }
 
   sessions.delete(session.id);
-  console.log(`Session ${session.id} ended: ${reason}`);
+  console.log(`[session] ${session.id} ended: ${reason}`);
 }
 
 const wss = new WebSocketServer({ port: PORT });
@@ -95,6 +107,11 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
   // ── Broadcaster ──────────────────────────────────────────
   if (pathname === '/broadcast') {
+    const rawPipeline = (parsedUrl.query.pipeline as string) || 'whisper-azure-azure';
+    const pipeline: PipelineVariant = VALID_PIPELINES.includes(rawPipeline as PipelineVariant)
+      ? (rawPipeline as PipelineVariant)
+      : 'whisper-azure-azure';
+
     const sessionId = generateSessionId();
     const now = new Date();
     const timeoutAt = new Date(now.getTime() + SESSION_TIMEOUT_MS);
@@ -114,6 +131,19 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       endSession(session, 'timeout');
     }, SESSION_TIMEOUT_MS);
 
+    const pipelineHandler = createPipelineHandler(
+      pipeline,
+      ['ta', 'fr', 'de'],
+      (lang, audioBuf) => {
+        const count = session.listenerSockets.get(lang)?.size ?? 0;
+        console.log(`[pipeline] Sending ${audioBuf.length} bytes to ${count} listener(s) for lang=${lang}`);
+        broadcastToListeners(session, lang, audioBuf);
+      },
+      (err) => {
+        console.error(`[pipeline] Error in session ${sessionId}:`, err);
+      },
+    );
+
     const session: Session = {
       id: sessionId,
       broadcasterSocket: ws,
@@ -127,45 +157,26 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       timeoutAt,
       timeoutTimer,
       warningTimer,
-      transcriptionHistory: [],
+      pipeline,
+      pipelineHandler,
     };
 
     sessions.set(sessionId, session);
-    console.log(`Session created: ${sessionId}`);
+    console.log(`[broadcast] Session created: ${sessionId} (pipeline: ${pipeline})`);
 
     sendJSON(ws, {
       type: 'session_created',
       sessionId,
+      pipeline,
       timeoutAt: timeoutAt.toISOString(),
     });
 
-    ws.on('message', async (data: Buffer, isBinary: boolean) => {
+    ws.on('message', (data: Buffer, isBinary: boolean) => {
       if (session.status !== 'active') return;
 
       if (isBinary) {
-        // Audio chunk from broadcaster
-        console.log(`[1] Binary chunk received — ${data.length} bytes, listeners: ta=${session.listenerSockets.get('ta')?.size ?? 0} fr=${session.listenerSockets.get('fr')?.size ?? 0}`);
-        try {
-          const { audioMap, transcribedText } = await processChunk(data, ['ta', 'fr', 'de'], session.transcriptionHistory);
-
-          // Update rolling context history
-          if (transcribedText) {
-            session.transcriptionHistory.push(transcribedText);
-            if (session.transcriptionHistory.length > CONTEXT_MAX_CHUNKS) {
-              session.transcriptionHistory.shift();
-            }
-          }
-
-          console.log(`[5] processChunk returned langs: [${[...audioMap.keys()].join(', ') || 'none'}]`);
-          for (const [lang, audioBuf] of audioMap) {
-            const count = session.listenerSockets.get(lang as Lang)?.size ?? 0;
-            console.log(`[6] Sending ${audioBuf.length} bytes to ${count} listener(s) for lang=${lang}`);
-            broadcastToListeners(session, lang as Lang, audioBuf);
-          }
-        } catch (err) {
-          console.error(`processChunk error in session ${sessionId}:`, err);
-          // Skip this chunk, continue
-        }
+        console.log(`[broadcast] Chunk received — ${data.length} bytes`);
+        session.pipelineHandler.pushChunk(data);
       } else {
         // Text control message
         try {
