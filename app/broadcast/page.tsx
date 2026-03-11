@@ -11,6 +11,8 @@ type PipelineVariant =
   | 'azure-v2v-stream'
   | 'azure-v2v-synthesizing'
   | 'azure-v2v-fix2'
+  | 'azure-v2v-silence500'
+  | 'azure-v2v-smooth'
   | 'whisper-azure-azure'
   | 'whisper-gpt4mini-azure'
   | 'whisper-gpt4o-azure';
@@ -21,6 +23,8 @@ const PIPELINE_OPTIONS: { value: PipelineVariant; label: string }[] = [
   { value: 'azure-v2v-stream',       label: 'Azure V2V Stream (max 5s Segmente)' },
   { value: 'azure-v2v-synthesizing', label: 'Azure V2V Fix1 — Sofort-Stream (synthesizing)' },
   { value: 'azure-v2v-fix2',         label: 'Azure V2V Fix2 — 300ms + Segment-Fix + Sofort-Stream' },
+  { value: 'azure-v2v-silence500',   label: 'Azure V2V Silence Fix — 500ms Segmentierung' },
+  { value: 'azure-v2v-smooth',       label: 'Azure V2V Smooth — 400ms gebufferter Stream' },
   { value: 'whisper-azure-azure',    label: 'Rang 1 — Whisper + Azure Translator + Azure TTS  (~8s)' },
   { value: 'whisper-gpt4mini-azure', label: 'Rang 2 — Whisper + GPT-4o-mini + Azure TTS  (~12s)' },
   { value: 'whisper-gpt4o-azure',    label: 'Rang 3 — Whisper + GPT-4o + Azure TTS  (~12.5s)' },

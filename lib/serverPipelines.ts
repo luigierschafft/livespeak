@@ -10,6 +10,8 @@ export type PipelineVariant =
   | 'azure-v2v-stream'
   | 'azure-v2v-synthesizing'
   | 'azure-v2v-fix2'
+  | 'azure-v2v-silence500'
+  | 'azure-v2v-smooth'
   | 'whisper-azure-azure'
   | 'whisper-gpt4mini-azure'
   | 'whisper-gpt4o-azure';
@@ -27,6 +29,8 @@ export const PIPELINE_LABELS: Record<PipelineVariant, string> = {
   'azure-v2v-stream':       'Azure V2V Stream (max 5s Segmente)',
   'azure-v2v-synthesizing': 'Azure V2V Fix1 — Sofort-Stream (synthesizing)',
   'azure-v2v-fix2':         'Azure V2V Fix2 — 300ms Pause + korrekter Segment-Property',
+  'azure-v2v-silence500':   'Azure V2V Silence Fix — 500ms Segmentierung',
+  'azure-v2v-smooth':       'Azure V2V Smooth — 400ms gebufferter Stream',
   'whisper-azure-azure':    'Whisper + Azure Translator + Azure TTS  (Rang 1 — 8s)',
   'whisper-gpt4mini-azure': 'Whisper + GPT-4o-mini + Azure TTS       (Rang 2 — 12s)',
   'whisper-gpt4o-azure':    'Whisper + GPT-4o + Azure TTS            (Rang 3 — 12.5s)',
@@ -133,7 +137,9 @@ async function gptTranslateMulti(
 interface AzureV2VOptions {
   endSilenceMs?: number;
   maxSegmentMs?: number;
+  segmentationSilenceMs?: number; // Speech_SegmentationSilenceTimeoutMs — phrase-level silence
   streamOnSynthesizing?: boolean; // Fix1: send audio immediately per synthesizing chunk
+  flushIntervalMs?: number;       // Smooth: buffer synthesizing chunks, flush every N ms
 }
 
 function createAzureV2VHandler(
@@ -146,6 +152,7 @@ function createAzureV2VHandler(
     recognizer: sdk.TranslationRecognizer;
     pushStream: sdk.PushAudioInputStream;
     audioChunks: Buffer[];
+    flushInterval: NodeJS.Timeout | null;
   }>();
 
   for (const lang of targetLangs) {
@@ -161,8 +168,11 @@ function createAzureV2VHandler(
       config.setProperty(sdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, String(options.endSilenceMs));
     }
     if (options.maxSegmentMs !== undefined) {
-      // Fix2: use the correct SDK PropertyId instead of the undocumented string
       config.setProperty(sdk.PropertyId.Speech_SegmentationMaximumTimeMs, String(options.maxSegmentMs));
+    }
+    if (options.segmentationSilenceMs !== undefined) {
+      // Phrase-level silence: fires recognized after N ms of silence within a segment
+      config.setProperty(sdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, String(options.segmentationSilenceMs));
     }
 
     const pushStream = sdk.AudioInputStream.createPushStream(
@@ -171,6 +181,15 @@ function createAzureV2VHandler(
     const audioConfig = sdk.AudioConfig.fromStreamInput(pushStream);
     const recognizer = new sdk.TranslationRecognizer(config, audioConfig);
     const audioChunks: Buffer[] = [];
+
+    // Smooth mode: flush buffered synthesizing chunks every N ms
+    let flushInterval: NodeJS.Timeout | null = null;
+    if (options.flushIntervalMs) {
+      flushInterval = setInterval(() => {
+        const chunks = audioChunks.splice(0);
+        if (chunks.length > 0) onAudio(lang, Buffer.concat(chunks));
+      }, options.flushIntervalMs);
+    }
 
     recognizer.synthesizing = (_, e) => {
       if (e.result.audio && e.result.audio.byteLength > 0) {
@@ -185,6 +204,7 @@ function createAzureV2VHandler(
 
     recognizer.recognized = (_, e) => {
       if (options.streamOnSynthesizing) return; // already sent in synthesizing
+      if (options.flushIntervalMs) return;       // already flushed by interval
       const chunks = audioChunks.splice(0);
       if (e.result.reason === sdk.ResultReason.TranslatedSpeech && chunks.length > 0) {
         onAudio(lang, Buffer.concat(chunks));
@@ -202,7 +222,7 @@ function createAzureV2VHandler(
       (err) => onError(new Error(`Azure V2V start failed (${lang}): ${err}`)),
     );
 
-    recognizers.set(lang, { recognizer, pushStream, audioChunks });
+    recognizers.set(lang, { recognizer, pushStream, audioChunks, flushInterval });
   }
 
   return {
@@ -217,8 +237,9 @@ function createAzureV2VHandler(
       }
     },
     async stop(): Promise<void> {
-      for (const { recognizer, pushStream } of recognizers.values()) {
+      for (const { recognizer, pushStream, flushInterval } of recognizers.values()) {
         try {
+          if (flushInterval) clearInterval(flushInterval);
           pushStream.close();
           await new Promise<void>((resolve) => {
             recognizer.stopContinuousRecognitionAsync(
@@ -308,8 +329,15 @@ export function createPipelineHandler(
     return createAzureV2VHandler(targetLangs, onAudio, onError, { streamOnSynthesizing: true });
   }
   if (variant === 'azure-v2v-fix2') {
-    // Fix2: correct segmentation property + short silence timeout
     return createAzureV2VHandler(targetLangs, onAudio, onError, { endSilenceMs: 300, maxSegmentMs: 5000, streamOnSynthesizing: true });
+  }
+  if (variant === 'azure-v2v-silence500') {
+    // Correct phrase-level silence property — fires recognized after 500ms of silence
+    return createAzureV2VHandler(targetLangs, onAudio, onError, { segmentationSilenceMs: 500 });
+  }
+  if (variant === 'azure-v2v-smooth') {
+    // Buffer synthesizing chunks, flush every 400ms — smoother than Fix1, faster than recognized
+    return createAzureV2VHandler(targetLangs, onAudio, onError, { flushIntervalMs: 400 });
   }
   return createWhisperBasedHandler(variant, targetLangs, onAudio, onError);
 }
