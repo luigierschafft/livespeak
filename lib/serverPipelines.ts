@@ -12,6 +12,8 @@ export type PipelineVariant =
   | 'azure-v2v-fix2'
   | 'azure-v2v-silence500'
   | 'azure-v2v-smooth'
+  | 'azure-v2v-smooth-filtered'
+  | 'azure-v2v-preconnect'
   | 'whisper-azure-azure'
   | 'whisper-gpt4mini-azure'
   | 'whisper-gpt4o-azure';
@@ -30,7 +32,9 @@ export const PIPELINE_LABELS: Record<PipelineVariant, string> = {
   'azure-v2v-synthesizing': 'Azure V2V Fix1 — Sofort-Stream (synthesizing)',
   'azure-v2v-fix2':         'Azure V2V Fix2 — 300ms Pause + korrekter Segment-Property',
   'azure-v2v-silence500':   'Azure V2V Silence Fix — 500ms Segmentierung',
-  'azure-v2v-smooth':       'Azure V2V Smooth — 400ms gebufferter Stream',
+  'azure-v2v-smooth':          'Azure V2V Smooth — 400ms gebufferter Stream',
+  'azure-v2v-smooth-filtered': 'Azure V2V Smooth Filtered — 400ms + Anti-Halluzination',
+  'azure-v2v-preconnect':      'Azure V2V Preconnect — Vorgeöffnete Verbindung',
   'whisper-azure-azure':    'Whisper + Azure Translator + Azure TTS  (Rang 1 — 8s)',
   'whisper-gpt4mini-azure': 'Whisper + GPT-4o-mini + Azure TTS       (Rang 2 — 12s)',
   'whisper-gpt4o-azure':    'Whisper + GPT-4o + Azure TTS            (Rang 3 — 12.5s)',
@@ -137,9 +141,11 @@ async function gptTranslateMulti(
 interface AzureV2VOptions {
   endSilenceMs?: number;
   maxSegmentMs?: number;
-  segmentationSilenceMs?: number; // Speech_SegmentationSilenceTimeoutMs — phrase-level silence
-  streamOnSynthesizing?: boolean; // Fix1: send audio immediately per synthesizing chunk
-  flushIntervalMs?: number;       // Smooth: buffer synthesizing chunks, flush every N ms
+  segmentationSilenceMs?: number;   // Speech_SegmentationSilenceTimeoutMs — phrase-level silence
+  streamOnSynthesizing?: boolean;   // Fix1: send audio immediately per synthesizing chunk
+  flushIntervalMs?: number;         // Smooth: buffer synthesizing chunks, flush every N ms
+  validateWithRecognized?: boolean; // Smooth-Filtered: discard chunks if no valid speech detected
+  preConnect?: boolean;             // Pre-open Azure WebSocket before first audio chunk arrives
 }
 
 function createAzureV2VHandler(
@@ -181,14 +187,25 @@ function createAzureV2VHandler(
     const audioConfig = sdk.AudioConfig.fromStreamInput(pushStream);
     const recognizer = new sdk.TranslationRecognizer(config, audioConfig);
     const audioChunks: Buffer[] = [];
+    let hasValidSpeech = false;
 
     // Smooth mode: flush buffered synthesizing chunks every N ms
     let flushInterval: NodeJS.Timeout | null = null;
     if (options.flushIntervalMs) {
       flushInterval = setInterval(() => {
+        if (options.validateWithRecognized && !hasValidSpeech) {
+          audioChunks.splice(0); // discard — no valid speech confirmed yet
+          return;
+        }
         const chunks = audioChunks.splice(0);
         if (chunks.length > 0) onAudio(lang, Buffer.concat(chunks));
       }, options.flushIntervalMs);
+    }
+
+    // Pre-open Azure WebSocket connection before first audio chunk arrives
+    if (options.preConnect) {
+      const connection = sdk.Connection.fromRecognizer(recognizer);
+      connection.openConnection();
     }
 
     recognizer.synthesizing = (_, e) => {
@@ -204,6 +221,15 @@ function createAzureV2VHandler(
 
     recognizer.recognized = (_, e) => {
       if (options.streamOnSynthesizing) return; // already sent in synthesizing
+      if (options.validateWithRecognized) {
+        if (e.result.reason === sdk.ResultReason.TranslatedSpeech && e.result.text.trim().length > 3) {
+          hasValidSpeech = true;
+        } else if (e.result.reason === sdk.ResultReason.NoMatch) {
+          hasValidSpeech = false;
+          audioChunks.splice(0); // discard hallucinated audio immediately
+        }
+        return; // flushing handled by interval
+      }
       if (options.flushIntervalMs) return;       // already flushed by interval
       const chunks = audioChunks.splice(0);
       if (e.result.reason === sdk.ResultReason.TranslatedSpeech && chunks.length > 0) {
@@ -336,8 +362,13 @@ export function createPipelineHandler(
     return createAzureV2VHandler(targetLangs, onAudio, onError, { segmentationSilenceMs: 500 });
   }
   if (variant === 'azure-v2v-smooth') {
-    // Buffer synthesizing chunks, flush every 400ms — smoother than Fix1, faster than recognized
     return createAzureV2VHandler(targetLangs, onAudio, onError, { flushIntervalMs: 400 });
+  }
+  if (variant === 'azure-v2v-smooth-filtered') {
+    return createAzureV2VHandler(targetLangs, onAudio, onError, { flushIntervalMs: 400, validateWithRecognized: true });
+  }
+  if (variant === 'azure-v2v-preconnect') {
+    return createAzureV2VHandler(targetLangs, onAudio, onError, { preConnect: true });
   }
   return createWhisperBasedHandler(variant, targetLangs, onAudio, onError);
 }
