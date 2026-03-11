@@ -202,12 +202,6 @@ function createAzureV2VHandler(
       }, options.flushIntervalMs);
     }
 
-    // Pre-open Azure WebSocket connection before first audio chunk arrives
-    if (options.preConnect) {
-      const connection = sdk.Connection.fromRecognizer(recognizer);
-      connection.openConnection();
-    }
-
     recognizer.synthesizing = (_, e) => {
       if (e.result.audio && e.result.audio.byteLength > 0) {
         if (options.streamOnSynthesizing) {
@@ -244,7 +238,13 @@ function createAzureV2VHandler(
     };
 
     recognizer.startContinuousRecognitionAsync(
-      () => console.log(`[pipeline] Azure V2V started for ${lang}`),
+      () => {
+        console.log(`[pipeline] Azure V2V started for ${lang}`);
+        // Pre-open connection AFTER recognition starts — avoids state conflict
+        if (options.preConnect) {
+          sdk.Connection.fromRecognizer(recognizer).openConnection();
+        }
+      },
       (err) => onError(new Error(`Azure V2V start failed (${lang}): ${err}`)),
     );
 
